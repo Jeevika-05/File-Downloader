@@ -8,8 +8,48 @@
 
 #define MAX_THREADS 8 // max simultaneous threads
 #define BUFFER_SIZE 8192 //8KB
+#define MAX_FILES 10
+
+typedef struct
+{
+	char url[512];
+	char save_path[256];
+	char output_filename[256];
+	long file_size;
+	int CHUNK_SIZE;
+	long downloaded_bytes;
+	int pause_flag;
+	int cancel_flag;
+	int num_chunks;
+	pthread_mutex_t progress_lock;
+	sem_t download_sem;
+	pthread_mutex_t  pause_lock;
+	pthread_cond_t pause_cond;
+
+}FileDownload;
+typedef struct
+{
+	int thread_id;
+	long start_byte;
+	long end_byte;
+	FileDownload *file_info;
+
+}DownloadTask;
 
 
+void delete_chunks(FileDownload *file)
+{
+	char chunk_filename[512];
+	for(int i=0;i<file->num_chunks;i++)
+	{
+		snprintf(chunk_filename,sizeof(chunk_filename),"%s/chunk_%d.tmp",file->save_path,i);
+
+		if(unlink(chunk_filename)==0)
+			printf("Deleted chunk :%s\n",chunk_filename);
+		else
+			perror("Error deleting chunk");
+	}
+}
 int ensure_directory(const char*dir)
 {
 	struct stat st={0};
@@ -23,29 +63,6 @@ int ensure_directory(const char*dir)
 	}
 	return 0;
 }
-typedef struct
-{
-	char url[512];
-	char save_path[256];
-	char output_filename[256];
-	long file_size;
-	int CHUNK_SIZE;
-	long downloaded_bytes;
-	int pause_flag;
-	pthread_mutex_t progress_lock;
-	sem_t download_sem;
-	pthread_mutex_t  pause_lock;
-	pthread_cond_t pause_cond;
-}FileDownload;
-
-typedef struct
-{
-	int thread_id;
-	long start_byte;
-	long end_byte;
-	FileDownload *file_info;
-
-}DownloadTask;
 
 
 //ADAPTIVE CHUNK SIZING
@@ -142,38 +159,64 @@ void *progress_bar(void *args)
 void *command_listener(void *args)
 {
 	char command;
-	FileDownload *file=(FileDownload*)args;
+	FileDownload *files=(FileDownload*)args;
+	int file_index;
 
-	while(file->downloaded_bytes < file->file_size)
+	while(1)
 	{
+		printf("Enter command (P <index>, R <index>, Q <index>/ALL): ");
 		scanf(" %c",&command);
 		if(command =='P' || command == 'p')
 		{
-			file->pause_flag=1;
-			printf("Download paused\n");
+			scanf("%d", &file_index);
+            		if (file_index >= 0)
+			{
+                		files[file_index].pause_flag = 1;
+                		printf("File %d paused\n", file_index);
+            		}
 		}
-		else if(command =='R' || command == 'r')
+
+		else if (command == 'R' || command == 'r')
 		{
-			pthread_mutex_lock(&file->pause_lock);
-
-			file->pause_flag=0;
-			pthread_cond_broadcast(&file->pause_cond);
-			pthread_mutex_unlock(&file->pause_lock);
-
-			printf("Download resumed\n");
-		}
+            		scanf("%d", &file_index);
+            		if (file_index >= 0) {
+                		pthread_mutex_lock(&files[file_index].pause_lock);
+                		files[file_index].pause_flag = 0;
+                		pthread_cond_broadcast(&files[file_index].pause_cond);
+                		pthread_mutex_unlock(&files[file_index].pause_lock);
+                		printf("File %d resumed\n", file_index);
+            		}
+        	}
 		else if(command=='Q' || command =='q')
 		{
-			printf("Download cancelled\n");
-			exit(0);
+			char target[10];
+        	    	scanf("%s", target);
+            		if (strcmp(target, "ALL") == 0)
+			{
+                		printf("Cancelling all downloads...\n");
+                		for (int i = 0; i < MAX_FILES; i++) {
+                    			files[i].cancel_flag = 1;
+                    			delete_chunks(&files[i]);
+                		}
+               			 exit(0);
+			}
+			else
+			{
+                		file_index = atoi(target);
+                		if (file_index >= 0) {
+                    			printf("Cancelling File %d...\n", file_index);
+                    			files[file_index].cancel_flag = 1;
+                    			delete_chunks(&files[file_index]);
+                		}
 		}
-	}
+
 	return NULL;
 }
 void merge_files(FileDownload *file,int num_chunks)
 {
 	char final_filepath[512];
-	sprintf(final_filepath,"%s/%s",file->save_path,file->output_filename);
+	snprintf(final_filepath, sizeof(final_filepath), "%s/%s", file->save_path, file->output_filename);
+
 	FILE *final_file=fopen(final_filepath,"wb");
 	if(!final_file)
 	{
@@ -182,11 +225,12 @@ void merge_files(FileDownload *file,int num_chunks)
 	}
 
 	char buffer[BUFFER_SIZE];
-	for(int i=0;i<num_chunks;i++)
+	for(int i=0;i<file->num_chunks;i++)
 	{
-		char filename[256];
-		sprintf(filename,"%s/chunk_%d.tmp",file->save_path,i);
-		FILE *chunk_file=fopen(filename,"rb");
+		char chunk_filename[256];
+		snprintf(chunk_filename, sizeof(chunk_filename), "%s/chunk_%d.tmp", file->save_path, i);
+
+		FILE *chunk_file=fopen(chunk_filename,"rb");
 
 		if(!chunk_file)
 		{
@@ -201,20 +245,23 @@ void merge_files(FileDownload *file,int num_chunks)
 		}
 
 		fclose(chunk_file);
-		remove(filename);
+
 	}
 
 	fclose(final_file);
-	printf("All chunks merged successfully into %s\n",file->output_filename);
+	delete_chunks(file);
+
+	printf("File %s merged and chunks deleted.\n", file->output_filename);
 }
 void *download_file(void *args)
 {
 	FileDownload *file =(FileDownload*)args;
+	file->num_chunks = (file->file_size + file->CHUNK_SIZE - 1) / file->CHUNK_SIZE;
+
 	printf("Downloading file to %s/%s\n",file->save_path,file->output_filename);
 
 	set_chunk_size(file);
 
-	int num_chunks=(file->file_size+file->CHUNK_SIZE -1)/file->CHUNK_SIZE;
 
 	pthread_t threads[MAX_THREADS];
 	pthread_t progress_thread,command_thread;
@@ -228,7 +275,7 @@ void *download_file(void *args)
 	pthread_create(&command_thread,NULL,command_listener,file);
 
 
-	for(int i=0;i<num_chunks;i++)
+	for(int i=0;i<file->num_chunks;i++)
 	{
 		sem_wait(&file->download_sem);
 
@@ -260,7 +307,7 @@ void *download_file(void *args)
 	pthread_join(command_thread,NULL);
 
 
-	merge_files(file,num_chunks);
+	merge_files(file,file->num_chunks);
 	sem_destroy(&file->download_sem);
 	pthread_mutex_destroy(&file->pause_lock);
 	pthread_cond_destroy(&file->pause_cond);
@@ -275,6 +322,11 @@ int main(int argc,char *argv[])
 	scanf("%d",&num_files);
 	getchar();
 
+ 	if (num_files > MAX_FILES) {
+        	printf("Error: Maximum number of downloads is %d.\n", MAX_FILES);
+        	return 1;
+    	}
+	char input[256];
 
 
 	FileDownload files[num_files];
@@ -310,7 +362,7 @@ int main(int argc,char *argv[])
 
 		files[i].url[strcspn(files[i].url,"\n")]='\0';
 
-		printf("Enter output filename for file %d:"i+1);
+		printf("Enter output filename for file %d:",i+1);
 		fgets(files[i].output_filename,sizeof(files[i].output_filename),stdin);
 		files[i].output_filename[strcspn(files[i].output_filename,"\n")]='\0';
 
