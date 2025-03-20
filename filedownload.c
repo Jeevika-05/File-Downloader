@@ -4,13 +4,25 @@
 #include<pthread.h>
 #include<semaphore.h>
 #include<unistd.h>
-#include<fcntl.h>
+#include<errno.h>
 
 #define MAX_THREADS 8 // max simultaneous threads
 #define BUFFER_SIZE 8192 //8KB
 
 
-
+int ensure_directory(const char*dir)
+{
+	struct stat st={0};
+	if(stat(dir,&st)==-1)
+	{
+		if(mkdir(dir,0755)!=0)
+		{
+			perror("Failed to create directory");
+			return -1;
+		}
+	}
+	return 0;
+}
 typedef struct
 {
 	char url[512];
@@ -18,7 +30,7 @@ typedef struct
 	char output_filename[256];
 	long file_size;
 	int CHUNK_SIZE;
-	long downloaded_bytes=0;
+	long downloaded_bytes;
 	int pause_flag;
 	pthread_mutex_t progress_lock;
 	sem_t download_sem;
@@ -198,6 +210,8 @@ void merge_files(FileDownload *file,int num_chunks)
 void *download_file(void *args)
 {
 	FileDownload *file =(FileDownload*)args;
+	printf("Downloading file to %s/%s\n",file->save_path,file->output_filename);
+
 	set_chunk_size(file);
 
 	int num_chunks=(file->file_size+file->CHUNK_SIZE -1)/file->CHUNK_SIZE;
@@ -233,7 +247,9 @@ void *download_file(void *args)
 
 		if(i%MAX_THREADS==MAX_THREADS-1|| i==num_chunks-1)
 		{
-			for(int j=0;j<MAX_THREADS && j<=i;j++)
+			int batch_size=(i%MAX_THREADS==MAX_THREADS -1)?MAX_THREADS:(i%MAX_THREADS)+1;
+
+			for(int j=0;j<batch_size;j++)
 			{
 				pthread_join(threads[j],NULL);
 				sem_post(&file->download_sem);
@@ -259,20 +275,51 @@ int main(int argc,char *argv[])
 	scanf("%d",&num_files);
 	getchar();
 
+
+
 	FileDownload files[num_files];
 	pthread_t file_threads[num_files];
 
+
+
+	const char*default_dir="/home/user/Downloads";
+	printf("Default download directory is \"%s\".Press enter to accept or type a different directory:",default_dir);
+	fgets(input,sizeof(input),stdin);
+
+	input[strcspn(input,"\n")]='\0';
+
+	const char *download_dir=(strlen(input)>0)?input : default_dir;
+
+	if(ensure_directory(download_dir)!=0)
+	{
+		fprintf(stderr,"Error:Unable to create or access the download  directory..");
+		exit(EXIT_FAILURE);
+	}
+
+	for(int i=0;i<num_files;i++)
+	{
+		strcpy(files[i].save_path,download_dir);
+		files[i].downloaded_bytes=0;
+		files[i].pause_flag=0;
+	}
 
 	for(int i=0;i<num_files;i++)
 	{
 		printf("\nEnter URL for file %d",i+1);
 		fgets(files[i].url,sizeof(files[i].url),stdin);
 
-		files[i].url[strcspn(files[i].url,"\n")]=0;
+		files[i].url[strcspn(files[i].url,"\n")]='\0';
+
+		printf("Enter output filename for file %d:"i+1);
+		fgets(files[i].output_filename,sizeof(files[i].output_filename),stdin);
+		files[i].output_filename[strcspn(files[i].output_filename,"\n")]='\0';
 
 		files[i].file_size=get_filesize();
 
 		pthread_create(&file_threads[i],NULL,download_file,&files[i]);
+
+		pthread_mutex_init(&files[i].pause_lock, NULL);
+        	pthread_cond_init(&files[i].pause_cond, NULL);
 	}
 	for(int i=0;i<num_files;i++)
 		pthread_join(file_threads[i]);
