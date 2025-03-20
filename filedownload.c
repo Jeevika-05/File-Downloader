@@ -9,7 +9,6 @@
 #define MAX_THREADS 8 // max simultaneous threads
 #define BUFFER_SIZE 8192 //8KB
 
-SSL *ssl_socket;
 
 
 typedef struct
@@ -23,6 +22,8 @@ typedef struct
 	int pause_flag;
 	pthread_mutex_t progress_lock;
 	sem_t download_sem;
+	pthread_mutex_t  pause_lock;
+	pthread_cond_t pause_cond;
 }FileDownload;
 
 typedef struct
@@ -70,22 +71,25 @@ void *download_chunk(void *args)
 	}
 
 	printf("Thread %d:Downloading bytes %ld to %ld for %s\n",task->thread_id,task->start_byte,task->end_byte,file->output_filename);
-
+/*	//create a new ssl connection for each thread....
 
 	//request chunk
 	char range_header[64];
 	sprintf(range_header,"Range : bytes=%ld-%ld\r\n",task->start_byte,task->end_byte);
 	send_https_request(range_header);//implement ???
+//modify logic
+*/
 
 	long total_received=0;
 	while(total_received < chunk_size)
 	{
 
-		if(file->pause_flag)
+		pthread_mutex_lock(&file->pause_lock);
+		while(file->pause_flag)
 		{
-			sleep(1);
-			continue;
+			pthread_cond_wait(&file->pause_cond,&file->pause_lock);
 		}
+		pthread_mutex_unlock(&file->pause_lock);
 
 
 		bytes_received =SSL_read(ssl_socket,buffer,sizeof(buffer));
@@ -126,7 +130,9 @@ void *progress_bar(void *args)
 void *command_listener(void *args)
 {
 	char command;
-	while(1)
+	FileDownload *file=(FileDownload*)args;
+
+	while(file->downloaded_bytes < file->file_size)
 	{
 		scanf(" %c",&command);
 		if(command =='P' || command == 'p')
@@ -136,7 +142,12 @@ void *command_listener(void *args)
 		}
 		else if(command =='R' || command == 'r')
 		{
+			pthread_mutex_lock(&file->pause_lock);
+
 			file->pause_flag=0;
+			pthread_cond_broadcast(&file->pause_cond);
+			pthread_mutex_unlock(&file->pause_lock);
+
 			printf("Download resumed\n");
 		}
 		else if(command=='Q' || command =='q')
@@ -196,6 +207,8 @@ void *download_file(void *args)
 
 	sem_init(&file->download_sem,0,MAX_THREADS);
 	pthread_mutex_init(&file->progress_lock,NULL);
+	pthread_mutex_init(&file->pause_lock,NULL);
+	pthread_cond_init(&file->pause_cond,NULL);
 
 	pthread_create(&progress_thread,NULL,progress_bar,file);
 	pthread_create(&command_thread,NULL,command_listener,file);
@@ -233,6 +246,9 @@ void *download_file(void *args)
 
 	merge_files(file,num_chunks);
 	sem_destroy(&file->download_sem);
+	pthread_mutex_destroy(&file->pause_lock);
+	pthread_cond_destroy(&file->pause_cond);
+
 	return NULL;
 }
 int main(int argc,char *argv[])
