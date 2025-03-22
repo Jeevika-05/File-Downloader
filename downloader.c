@@ -9,12 +9,19 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <sys/stat.h>
-#include<errno.h>
+#include <errno.h>
+#include <time.h>
 
 #define MAX_THREADS 8 // max simultaneous threads
 #define BUFFER_SIZE 8192 //8KB
 #define MAX_FILES 10
 int num_files;
+
+typedef struct
+{
+    FileDownload *files;
+    int num_files;
+} CommandListenerArgs;
 
 int ensure_directory(const char*dir)
 {
@@ -59,17 +66,21 @@ typedef struct {
 
 void delete_chunks(FileDownload *file)
 {
-	char chunk_filename[512];
-	for(int i=0;i<file->num_chunks;i++)
-	{
-		snprintf(chunk_filename,sizeof(chunk_filename),"%s/chunk_%d.tmp",file->save_path,i);
+    char chunk_filename[512];
+    for (int i = 0; i < file->num_chunks; i++)
+    {
+        snprintf(chunk_filename, sizeof(chunk_filename), "%s/chunk_%d.tmp", file->save_path, i);
 
-		if(unlink(chunk_filename)==0)
-			printf("Deleted chunk :%s\n",chunk_filename);
-		else
-			perror("Error deleting chunk");
-	}
+        if (access(chunk_filename, F_OK) == 0) // Check if file exists before deleting
+        {
+            if (unlink(chunk_filename) == 0)
+                printf("Deleted chunk: %s\n", chunk_filename);
+            else
+                perror("Error deleting chunk");
+        }
+    }
 }
+
 //------------------------------
 // Helper: Initialize SSL context
 SSL_CTX *init_ssl_context() {
@@ -384,96 +395,108 @@ void set_chunk_size(FileDownload *file)
 void *progress_bar(void *args)
 {
         FileDownload *file=(FileDownload*)args;
+	char time_str[64];
 
         while(file->downloaded_bytes < file->file_size && !file->cancel_flag)
         {
                 if(!file->pause_flag)
                 {
+			time_t now=time(NULL);
+			struct tm *t =localtime(&now);
+			strftime(time_str,sizeof(time_str),"%Y-%m-%d %H:%M:%S",t);
+
                         float percent =(file->downloaded_bytes / (float)file->file_size)*100;
-                        printf("\rDownloading %s :[%.2f%%] %ld/%ld bytes",file->output_filename,percent,file->downloaded_bytes,file->file_size);
+			printf("\r[%s] Downloading %s : [%.2f%%] %ld/%ld bytes  ",time_str, file->output_filename, percent,file->downloaded_bytes, file->file_size);
                         fflush(stdout);
                 }
                 sleep(1);
         }
-        printf("Download complete : %s !!\n",file->output_filename);
+	time_t now = time(NULL);
+	struct tm *t = localtime(&now);
+	strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", t);
+
+	printf("\r[%s] Download complete: %s !!                  \n", time_str, file->output_filename);
+
         return NULL;
 }
 void *command_listener(void *args)
 {
-	char command;
-	FileDownload *files=(FileDownload*)args;
-	int file_index;
+    CommandListenerArgs *cla = (CommandListenerArgs*)args;
+    FileDownload *files = cla->files;
+    char command;
+    int file_index;
 
-	while(1)
-	{
-		int active_downloads = 0;
-        	for (int i = 0; i <num_files ; i++) {
-            		if (files[i].downloaded_bytes < files[i].file_size && !files[i].cancel_flag) {
-                		active_downloads = 1;
-                		break;
-            		}
-        	}
-        	if (!active_downloads) {
-            		printf("\nAll downloads finished or canceled. Exiting...\n");
-            		break;
-        	}
+    while (1)
+    {
+        int active_downloads = 0;
+        for (int i = 0; i < cla->num_files; i++) {
+            if (files[i].downloaded_bytes < files[i].file_size && !files[i].cancel_flag) {
+                active_downloads = 1;
+                break;
+            }
+        }
+        if (!active_downloads) {
+            printf("\nAll downloads finished or canceled. Exiting...\n");
+            break;  // ✅ Exit loop when all downloads finish
+        }
 
-		printf("Enter command (P <index>, R <index>, Q <index>/ALL): ");
-		scanf(" %c",&command);
-		if(command =='P' || command == 'p')
-		{
-			scanf("%d", &file_index);
-            		if (file_index >= 0 && file_index<num_files)
-			{
-				pthread_mutex_lock(&files[file_index].pause_lock);
-                		files[file_index].pause_flag = 1;
-				pthread_mutex_unlock(&files[file_index].pause_lock);
-                		printf("File %d paused\n", file_index);
-            		}
-		}
+        printf("Enter command (P <index>, R <index>, Q <index>/ALL): ");
+        scanf(" %c", &command);
 
-		else if (command == 'R' || command == 'r')
-		{
-            		scanf("%d", &file_index);
-            		if (file_index >= 0 && file_index < num_files) {
-                		pthread_mutex_lock(&files[file_index].pause_lock);
-                		files[file_index].pause_flag = 0;
-                		pthread_cond_signal(&files[file_index].pause_cond);
-                		pthread_mutex_unlock(&files[file_index].pause_lock);
-                		printf("File %d resumed\n", file_index);
-            		}
-        	}
-		else if(command=='Q' || command =='q')
-		{
-			char target[10];
-        	    	scanf("%s", target);
-            		if (strcmp(target, "ALL") == 0)
-			{
-                		printf("Cancelling all downloads...\n");
-                		for (int i = 0; i < num_files; i++) {
-                    			pthread_mutex_lock(&files[i].pause_lock);
-					files[i].cancel_flag = 1;
-					pthread_cond_signal(&files[i].pause_cond);
-					pthread_mutex_unlock(&files[i].pause_lock);
-                    			delete_chunks(&files[i]);
-                		}
-               			break;
-			}
-			else
-			{
-                		file_index = atoi(target);
-                		if (file_index >= 0 && file_index <num_files) {
-					pthread_mutex_lock(&files[file_index].pause_lock);
-                    			files[file_index].cancel_flag = 1;
-					pthread_cond_signal(&files[file_index].pause_cond);
-                    			delete_chunks(&files[file_index]);
-                    			printf("Cancelling File %d...\n", file_index);
-                		}
-			}
-		}
-	}
+        if (command == 'P' || command == 'p')
+        {
+            scanf("%d", &file_index);
+            if (file_index >= 0 && file_index < cla->num_files)
+            {
+                pthread_mutex_lock(&files[file_index].pause_lock);
+                files[file_index].pause_flag = 1;
+                pthread_mutex_unlock(&files[file_index].pause_lock);
+                printf("File %d paused\n", file_index);
+            }
+        }
+        else if (command == 'R' || command == 'r')
+        {
+            scanf("%d", &file_index);
+            if (file_index >= 0 && file_index < cla->num_files) {
+                pthread_mutex_lock(&files[file_index].pause_lock);
+                files[file_index].pause_flag = 0;
+                pthread_cond_signal(&files[file_index].pause_cond);
+                pthread_mutex_unlock(&files[file_index].pause_lock);
+                printf("File %d resumed\n", file_index);
+            }
+        }
+        else if (command == 'Q' || command == 'q')
+        {
+            char target[10];
+            scanf("%s", target);
+            if (strcmp(target, "ALL") == 0)
+            {
+                printf("Cancelling all downloads...\n");
+                for (int i = 0; i < cla->num_files; i++) {
+                    pthread_mutex_lock(&files[i].pause_lock);
+                    files[i].cancel_flag = 1;
+                    pthread_cond_signal(&files[i].pause_cond);
+                    pthread_mutex_unlock(&files[i].pause_lock);
+                    delete_chunks(&files[i]);
+                }
+                break;
+            }
+            else
+            {
+                file_index = atoi(target);
+                if (file_index >= 0 && file_index < cla->num_files) {
+                    pthread_mutex_lock(&files[file_index].pause_lock);
+                    files[file_index].cancel_flag = 1;
+                    pthread_cond_signal(&files[file_index].pause_cond);
+                    pthread_mutex_unlock(&files[file_index].pause_lock);
+                    delete_chunks(&files[file_index]);
+                    printf("Cancelling File %d...\n", file_index);
+                }
+            }
+        }
+    }
 
-	return NULL;
+    return NULL;
 }
 
 void merge_files(FileDownload *file,int num_chunks)
@@ -538,7 +561,6 @@ void *download_file(void *args)
         pthread_cond_init(&file->pause_cond,NULL);
 
         pthread_create(&progress_thread,NULL,progress_bar,file);
-        pthread_create(&command_thread,NULL,command_listener,file);
 
 
         for(int i=0;i<num_chunks;i++)
@@ -570,14 +592,10 @@ void *download_file(void *args)
                 }
         }
 
-	printf("whyyyyyyy");
 
         pthread_join(progress_thread,NULL);
-	printf("whuihkiyhyyyyyyy....");
 
-        pthread_join(command_thread,NULL);
-	printf("whuihkiyhyyyyyyy");
-
+	file->num_chunks=num_chunks;
         merge_files(file,num_chunks);
         sem_destroy(&file->download_sem);
         pthread_mutex_destroy(&file->pause_lock);
@@ -658,11 +676,17 @@ int main(int argc, char *argv[]) {
         // Create a thread for downloading
         pthread_create(&file_threads[i], NULL, download_file, &files[i]);
     }
+	CommandListenerArgs cla;
+    	cla.files = files;
+    	cla.num_files = num_files;
+    	pthread_t command_thread;
+    	pthread_create(&command_thread, NULL, command_listener, &cla);
 
     // Wait for all download threads to complete
     for (int i = 0; i < num_files; i++) {
         pthread_join(file_threads[i], NULL);
     }
+	pthread_join(command_thread, NULL);
 
     return 0;
 }
