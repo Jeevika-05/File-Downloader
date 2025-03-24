@@ -16,27 +16,6 @@
 #define BUFFER_SIZE 8192 //8KB
 #define MAX_FILES 10
 int num_files;
-
-typedef struct
-{
-    FileDownload *files;
-    int num_files;
-} CommandListenerArgs;
-
-int ensure_directory(const char*dir)
-{
-        struct stat st={0};
-        if(stat(dir,&st)==-1)
-        {
-                if(mkdir(dir,0755)!=0)
-                {
-                        perror("Failed to create directory");
-                        return -1;
-                }
-        }
-        return 0;
-}
-
 // Structure for file download info
 typedef struct
 {
@@ -63,6 +42,30 @@ typedef struct {
     long end_byte;
     FileDownload *file_info;
 } DownloadTask;
+
+typedef struct
+{
+    FileDownload *files;
+    int exit_flag;
+    int num_files;
+    pthread_mutex_t exit_lock;
+} CommandListenerArgs;
+
+int ensure_directory(const char*dir)
+{
+        struct stat st={0};
+        if(stat(dir,&st)==-1)
+        {
+                if(mkdir(dir,0755)!=0)
+                {
+                        perror("Failed to create directory");
+                        return -1;
+                }
+        }
+        return 0;
+}
+
+
 
 void delete_chunks(FileDownload *file)
 {
@@ -423,79 +426,107 @@ void *command_listener(void *args)
 {
     CommandListenerArgs *cla = (CommandListenerArgs*)args;
     FileDownload *files = cla->files;
+    char input_line[256];
     char command;
     int file_index;
 
     while (1)
     {
-        int active_downloads = 0;
-        for (int i = 0; i < cla->num_files; i++) {
-            if (files[i].downloaded_bytes < files[i].file_size && !files[i].cancel_flag) {
-                active_downloads = 1;
-                break;
-            }
+        // Check for exit flag first.
+        pthread_mutex_lock(&cla->exit_lock);
+        if(cla->exit_flag)
+        {
+            pthread_mutex_unlock(&cla->exit_lock);
+            printf("Command listener exiting (select timeout).\n");
+            break;
         }
-        if (!active_downloads) {
-            printf("\nAll downloads finished or canceled. Exiting...\n");
-            break;  // ✅ Exit loop when all downloads finish
-        }
+        pthread_mutex_unlock(&cla->exit_lock);
 
-        printf("Enter command (P <index>, R <index>, Q <index>/ALL): ");
-        scanf(" %c", &command);
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
 
-        if (command == 'P' || command == 'p')
+        struct timeval tv;
+        tv.tv_sec = 1;    // 1 second timeout
+        tv.tv_usec = 0;
+
+        int retval = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
+        if (retval == -1)
         {
-            scanf("%d", &file_index);
-            if (file_index >= 0 && file_index < cla->num_files)
-            {
-                pthread_mutex_lock(&files[file_index].pause_lock);
-                files[file_index].pause_flag = 1;
-                pthread_mutex_unlock(&files[file_index].pause_lock);
-                printf("File %d paused\n", file_index);
-            }
+            perror("select()");
+            continue;
         }
-        else if (command == 'R' || command == 'r')
+        else if (retval == 0)
         {
-            scanf("%d", &file_index);
-            if (file_index >= 0 && file_index < cla->num_files) {
-                pthread_mutex_lock(&files[file_index].pause_lock);
-                files[file_index].pause_flag = 0;
-                pthread_cond_signal(&files[file_index].pause_cond);
-                pthread_mutex_unlock(&files[file_index].pause_lock);
-                printf("File %d resumed\n", file_index);
-            }
+            // Timeout occurred, no data, loop back and check exit_flag.
+            continue;
         }
-        else if (command == 'Q' || command == 'q')
+        else if (FD_ISSET(STDIN_FILENO, &readfds))
         {
-            char target[10];
-            scanf("%s", target);
-            if (strcmp(target, "ALL") == 0)
+            if(fgets(input_line, sizeof(input_line), stdin) != NULL)
             {
-                printf("Cancelling all downloads...\n");
-                for (int i = 0; i < cla->num_files; i++) {
-                    pthread_mutex_lock(&files[i].pause_lock);
-                    files[i].cancel_flag = 1;
-                    pthread_cond_signal(&files[i].pause_cond);
-                    pthread_mutex_unlock(&files[i].pause_lock);
-                    delete_chunks(&files[i]);
-                }
-                break;
-            }
-            else
-            {
-                file_index = atoi(target);
-                if (file_index >= 0 && file_index < cla->num_files) {
-                    pthread_mutex_lock(&files[file_index].pause_lock);
-                    files[file_index].cancel_flag = 1;
-                    pthread_cond_signal(&files[file_index].pause_cond);
-                    pthread_mutex_unlock(&files[file_index].pause_lock);
-                    delete_chunks(&files[file_index]);
-                    printf("Cancelling File %d...\n", file_index);
+                input_line[strcspn(input_line, "\n")] = '\0';
+                if (sscanf(input_line, " %c", &command) == 1)
+                {
+                    if (command == 'P' || command == 'p')
+                    {
+                        if(sscanf(input_line + 1, "%d", &file_index) == 1 &&
+                           file_index >= 0 && file_index < cla->num_files)
+                        {
+                            pthread_mutex_lock(&files[file_index].pause_lock);
+                            files[file_index].pause_flag = 1;
+                            pthread_mutex_unlock(&files[file_index].pause_lock);
+                            printf("File %d paused\n", file_index);
+                        }
+                    }
+                    else if (command == 'R' || command == 'r')
+                    {
+                        if(sscanf(input_line + 1, "%d", &file_index) == 1 &&
+                           file_index >= 0 && file_index < cla->num_files)
+                        {
+                            pthread_mutex_lock(&files[file_index].pause_lock);
+                            files[file_index].pause_flag = 0;
+                            pthread_cond_signal(&files[file_index].pause_cond);
+                            pthread_mutex_unlock(&files[file_index].pause_lock);
+                            printf("File %d resumed\n", file_index);
+                        }
+                    }
+                    else if (command == 'Q' || command == 'q')
+                    {
+                        char target[10];
+                        if(sscanf(input_line + 1, " %9s", target) == 1)
+                        {
+                            if (strcmp(target, "ALL") == 0)
+                            {
+                                printf("Cancelling all downloads...\n");
+                                for (int i = 0; i < cla->num_files; i++) {
+                                    pthread_mutex_lock(&files[i].pause_lock);
+                                    files[i].cancel_flag = 1;
+                                    pthread_cond_signal(&files[i].pause_cond);
+                                    pthread_mutex_unlock(&files[i].pause_lock);
+                                    delete_chunks(&files[i]);
+                                }
+                                break;
+                            }
+                            else
+                            {
+                                file_index = atoi(target);
+                                if (file_index >= 0 && file_index < cla->num_files)
+                                {
+                                    pthread_mutex_lock(&files[file_index].pause_lock);
+                                    files[file_index].cancel_flag = 1;
+                                    pthread_cond_signal(&files[file_index].pause_cond);
+                                    pthread_mutex_unlock(&files[file_index].pause_lock);
+                                    delete_chunks(&files[file_index]);
+                                    printf("Cancelling File %d...\n", file_index);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-
     return NULL;
 }
 
@@ -587,8 +618,10 @@ void *download_file(void *args)
                         for(int j=0;j<batch_size;j++)
                         {
                                 pthread_join(threads[j],NULL);
-                                sem_post(&file->download_sem);
                         }
+			for (int j = 0; j < batch_size; j++) {
+		    		sem_post(&file->download_sem);
+			}
                 }
         }
 
@@ -654,13 +687,6 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }*/
 
-        // Initialize SSL (if required for HTTPS)
-        //if (strncmp(files[i].url, "https://", 8) == 0) {
-            /*if (initialize_ssl() != 0) {
-                fprintf(stderr, "Error: Failed to initialize SSL.\n");
-                return EXIT_FAILURE;
-            }
-        }*/
 
         // Get file size from server
         files[i].file_size = get_file_size(hostname, path);
@@ -679,6 +705,8 @@ int main(int argc, char *argv[]) {
 	CommandListenerArgs cla;
     	cla.files = files;
     	cla.num_files = num_files;
+	cla.exit_flag=0;
+	pthread_mutex_init(&cla.exit_lock,NULL);
     	pthread_t command_thread;
     	pthread_create(&command_thread, NULL, command_listener, &cla);
 
@@ -686,7 +714,12 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_files; i++) {
         pthread_join(file_threads[i], NULL);
     }
-	pthread_join(command_thread, NULL);
+	pthread_mutex_lock(&cla.exit_lock);
+	cla.exit_flag=1;
+	pthread_mutex_unlock(&cla.exit_lock);
 
+	pthread_join(command_thread,NULL);
+
+	pthread_mutex_destroy(&cla.exit_lock);
     return 0;
 }
