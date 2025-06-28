@@ -97,13 +97,14 @@ Cancelling File 1...
 ## 🖼️ Screenshots
 
 ### ⏬ Download In Progress
-[![Download in Progress](screenshots/Download in progress.png)](screenshots/Download in progress.png)
+[![Download in Progress](screenshots/download_progress.png)](screenshots/download_progress.png)
 
 ### ✅ After Download Completion
-[![After Download](screenshots/After download.png)](screenshots/After download.png)
+[![After Download](screenshots/after_download.png)](screenshots/after_download.png)
 
 ### 📁 Downloaded File in Directory
-[![Downloaded File](screenshots/Downloaded.png)](screenshots/Downloaded.png)
+[![Downloaded File](screenshots/downloaded_file.png)](screenshots/downloaded_file.png)
+
 
 ---
 
