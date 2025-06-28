@@ -535,7 +535,8 @@ void merge_files(FileDownload *file,int num_chunks)
         snprintf(final_filepath, sizeof(final_filepath), "%s/%s", file->save_path, file->output_filename);
 
         FILE *final_file=fopen(final_filepath,"wb");
-        printf("final file path is %s/n",final_filepath);
+
+        printf("final file path is %s\n",final_filepath);
 
         if(!final_file)
         {
