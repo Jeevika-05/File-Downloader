@@ -19,7 +19,7 @@ A powerful and interactive multithreaded file downloader written in C using POSI
 - GCC compiler (Linux recommended)
 - POSIX-compliant system
 - Basic C standard libraries: `stdio.h`, `stdlib.h`, `pthread.h`, `semaphore.h`, `unistd.h`, `sys/select.h`, etc.
-- ✅ **OpenSSL** (`-lssl -lcrypto`) for secure downloads and SSL-based connections
+- ✅ OpenSSL (`-lssl -lcrypto`) for secure downloads and SSL-based connections
 
 ---
 
@@ -35,33 +35,39 @@ gcc downloader.c -o downloader -lssl -lcrypto -lpthread
 
 ## 🛠️ How It Works
 
-1. **User Input**:
-   - Number of files
-   - URLs and output filenames
-   - Optional download directory
+### ✅ User Input
 
-2. **Each File**:
-   - Gets its size via a HEAD request.
-   - Is divided into chunks.
-   - Each chunk is downloaded in a separate thread.
+- Number of files
+- URLs and output filenames
+- Optional download directory
 
-3. **During Download**:
-   - A command listener thread monitors stdin for input.
-   - You can pause (`pX`), resume (`rX`), or cancel (`qX`) downloads (`X` = file index).
-   - Use `qALL` to cancel all downloads.
+### 📦 Each File
 
-4. **Post-Download**:
-   - Chunks are merged into a single file.
-   - Temporary chunk files are deleted.
+- Gets its size via a HEAD request.
+- Is divided into chunks.
+- Each chunk is downloaded in a separate thread.
+
+### 🎮 During Download
+
+- A command listener thread monitors `stdin` for input.
+- You can pause (`pX`), resume (`rX`), or cancel (`qX`) downloads (`X = file index`).
+- Use `qALL` to cancel all downloads.
+
+### 📂 Post-Download
+
+- Chunks are merged into a single file.
+- Temporary chunk files are deleted.
 
 ---
 
-## 📦 Command Syntax
+## 🧾 Command Syntax
 
-- `pX` – Pause download of file X (e.g., `p1`)
-- `rX` – Resume download of file X (e.g., `r0`)
-- `qX` – Cancel download of file X (e.g., `q2`)
-- `qALL` – Cancel all downloads
+| Command | Description |
+|--------|-------------|
+| `pX`   | Pause download of file X (e.g., `p1`) |
+| `rX`   | Resume download of file X (e.g., `r0`) |
+| `qX`   | Cancel download of file X (e.g., `q2`) |
+| `qALL` | Cancel all downloads |
 
 ---
 
@@ -88,9 +94,20 @@ Cancelling File 1...
 
 ---
 
+## 🖼️ Screenshots
+
+### ⏬ Download In Progress
+[![Download in Progress](screenshots/Download in progress.png)](screenshots/Download in progress.png)
+
+### ✅ After Download Completion
+[![After Download](screenshots/After download.png)](screenshots/After download.png)
+
+### 📁 Downloaded File in Directory
+[![Downloaded File](screenshots/Downloaded.png)](screenshots/Downloaded.png)
+
+---
+
 ## 🧼 Cleanup & Exit
 
 - Temporary chunk files are deleted after merging.
 - All threads cleanly exit after download or cancellation.
-
-
